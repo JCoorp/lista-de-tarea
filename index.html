@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lista de Tareas</title>
+    <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+<header>
+    <h1>📝 Lista de Tareas</h1>
+</header>
+
+<main>
+    <section class="task-form">
+        <form id="form">
+            <input type="text" id="taskInput" placeholder="Escribe una tarea...">
+            <button type="submit">Agregar</button>
+        </form>
+        <p id="counter">Tareas pendientes: 0</p>
+    </section>
+
+    <section class="filters">
+        <button data-filter="all">Todas</button>
+        <button data-filter="pending">Pendientes</button>
+        <button data-filter="completed">Completadas</button>
+    </section>
+
+    <section class="task-list">
+        <ul id="taskList"></ul>
+    </section>
+</main>
+
+<footer>
+    <p>Prueba técnica - Todo List</p>
+</footer>
+
+<script src="js/app.js"></script>
+</body>
+</html>
