@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Configuración de Classroom Agent</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="options">
+    <h1>Configuración de Classroom Agent</h1>
+    <p>Estos datos aparecen en el registro de <code>setupAgentV2</code>. El token se guarda únicamente en el almacenamiento local de Chrome.</p>
+
+    <label for="endpoint">URL de la aplicación web de Apps Script</label>
+    <input id="endpoint" type="url" placeholder="https://script.google.com/macros/s/.../exec">
+
+    <label for="token">Token privado del agente</label>
+    <input id="token" type="password" autocomplete="off">
+
+    <div class="actions">
+      <button id="test" class="secondary" type="button">Probar conexión</button>
+      <button id="save" class="primary" type="button">Guardar</button>
+    </div>
+    <p id="status" class="status"></p>
+  </main>
+  <script src="options.js"></script>
+</body>
+</html>
