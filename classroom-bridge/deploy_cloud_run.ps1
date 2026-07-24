@@ -156,12 +156,23 @@ if (-not $serviceUrl) {
     throw "No fue posible obtener la URL de Cloud Run."
 }
 
+$callbackUrl = "$serviceUrl/oauth/callback"
+
 if (Get-Command "gh" -ErrorAction SilentlyContinue) {
     & gh auth status *> $null
     if ($LASTEXITCODE -eq 0) {
         & gh secret set CLASSROOM_BRIDGE_URL --repo $Repository --body $serviceUrl
         & gh secret set CLASSROOM_BRIDGE_API_KEY --repo $Repository --body $bridgeApiKey
-        Write-Host "Se configuraron automáticamente los secretos de GitHub Actions."
+        $issueBody = @"
+Portal OAuth desplegado correctamente.
+
+- Inicio de sesión: $serviceUrl
+- URI de retorno: $callbackUrl
+
+La URL es pública, pero `/sync` requiere una clave privada y el portal solo acepta el correo escolar configurado.
+"@
+        & gh issue comment 1 --repo $Repository --body $issueBody
+        Write-Host "Se configuraron los secretos de Actions y se registró la URL en el issue #1."
     }
     else {
         Write-Warning "GitHub CLI no está autenticado. Ejecuta 'gh auth login' y vuelve a ejecutar el script para guardar los secretos de Actions."
@@ -171,7 +182,6 @@ else {
     Write-Warning "No se encontró GitHub CLI. Debes crear manualmente CLASSROOM_BRIDGE_URL y CLASSROOM_BRIDGE_API_KEY en GitHub Actions Secrets."
 }
 
-$callbackUrl = "$serviceUrl/oauth/callback"
 Write-Host ""
 Write-Host "Portal desplegado: $serviceUrl"
 Write-Host "Agrega exactamente esta URI en Google Cloud > OAuth Client > Authorized redirect URIs:"
