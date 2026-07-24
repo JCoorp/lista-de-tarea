@@ -2,6 +2,8 @@
 __pycache__/
 .pytest_cache/
 credentials.json
+oauth_web_credentials.json
 token.json
 google_token.b64
+.env
 *.pyc
