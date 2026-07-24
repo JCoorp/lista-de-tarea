@@ -20,13 +20,20 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Check JavaScript syntax
+      - name: Check Apps Script syntax
         run: |
-          node --check classroom-agent/apps-script/Agent.gs
-          node --check classroom-agent/chrome-extension/background.js
-          node --check classroom-agent/chrome-extension/content.js
-          node --check classroom-agent/chrome-extension/popup.js
-          node --check classroom-agent/chrome-extension/options.js
+          cp classroom-agent/apps-script/Agent.gs /tmp/ClassroomAgent.js
+          node --check /tmp/ClassroomAgent.js
+      - name: Check extension JavaScript syntax
+        run: |
+          for file in \
+            classroom-agent/chrome-extension/background.js \
+            classroom-agent/chrome-extension/content.js \
+            classroom-agent/chrome-extension/popup.js \
+            classroom-agent/chrome-extension/options.js; do
+            echo "Checking $file"
+            node --check "$file"
+          done
       - name: Check JSON files
         run: |
           node -e "JSON.parse(require('fs').readFileSync('classroom-agent/apps-script/appsscript.json','utf8'))"
