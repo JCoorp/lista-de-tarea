@@ -1,0 +1,39 @@
+name: Classroom Agent Check
+
+on:
+  pull_request:
+    paths:
+      - 'classroom-agent/**'
+      - '.github/workflows/classroom-agent-check.yml'
+  push:
+    branches:
+      - classroom-agent-v2
+    paths:
+      - 'classroom-agent/**'
+      - '.github/workflows/classroom-agent-check.yml'
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check JavaScript syntax
+        run: |
+          node --check classroom-agent/apps-script/Agent.gs
+          node --check classroom-agent/chrome-extension/background.js
+          node --check classroom-agent/chrome-extension/content.js
+          node --check classroom-agent/chrome-extension/popup.js
+          node --check classroom-agent/chrome-extension/options.js
+      - name: Check JSON files
+        run: |
+          node -e "JSON.parse(require('fs').readFileSync('classroom-agent/apps-script/appsscript.json','utf8'))"
+          node -e "JSON.parse(require('fs').readFileSync('classroom-agent/chrome-extension/manifest.json','utf8'))"
+      - name: Verify required files
+        run: |
+          test -f classroom-agent/README.md
+          test -f classroom-agent/chrome-extension/popup.html
+          test -f classroom-agent/chrome-extension/options.html
+          test -f classroom-agent/chrome-extension/styles.css
