@@ -241,11 +241,35 @@ def oauth_callback(request: Request) -> HTMLResponse:
             409,
         )
 
-    write_authorization_secret(credentials.to_json(), email)
+    credentials_json = credentials.to_json()
+    write_authorization_secret(credentials_json, email)
+
+    sync_message = (
+        "<p>La autorización quedó guardada. La sincronización automática comenzará "
+        "en su siguiente ejecución.</p>"
+    )
+    try:
+        encoded = base64.b64encode(credentials_json.encode("utf-8")).decode("ascii")
+        os.environ["GOOGLE_TOKEN_JSON_B64"] = encoded
+        result = sync()
+        sync_message = (
+            "<p>La primera sincronización también terminó correctamente: "
+            f"<strong>{result.pending_count}</strong> pendientes, "
+            f"<strong>{result.overdue_count}</strong> atrasadas en "
+            f"<strong>{result.course_count}</strong> cursos activos.</p>"
+        )
+    except Exception:
+        # La autorización sigue siendo válida aunque una consulta puntual falle.
+        sync_message = (
+            "<p>La cuenta quedó conectada, pero la primera sincronización no pudo "
+            "completarse. El proceso automático volverá a intentarlo.</p>"
+        )
+
     return page(
         "Classroom conectado",
         f"<p>La cuenta <strong>{escape(email)}</strong> quedó autorizada correctamente.</p>"
-        "<p>Ya puedes cerrar esta ventana. Las siguientes consultas no pedirán inicio de sesión, "
+        + sync_message
+        + "<p>Ya puedes cerrar esta ventana. Las siguientes consultas no pedirán inicio de sesión, "
         "salvo que Google, tu escuela o tú revoquen el permiso.</p>",
     )
 
