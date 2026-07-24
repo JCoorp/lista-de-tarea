@@ -23,7 +23,11 @@ test.addEventListener('click', async () => {
     const url = new URL(config.endpoint);
     url.searchParams.set('token', config.token);
     url.searchParams.set('action', 'health');
-    const response = await fetch(url.toString(), { redirect: 'follow', cache: 'no-store' });
+    const response = await fetch(url.toString(), {
+      redirect: 'follow',
+      cache: 'no-store',
+      credentials: 'include',
+    });
     const data = await response.json();
     if (!data.ok) throw new Error(data.error || 'El agente no respondió correctamente.');
     status.textContent = 'Conexión correcta.';
