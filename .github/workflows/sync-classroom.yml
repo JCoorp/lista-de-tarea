@@ -21,24 +21,64 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Check OAuth configuration
+      - name: Select synchronization mode
         id: config
         env:
+          CLASSROOM_BRIDGE_URL: ${{ secrets.CLASSROOM_BRIDGE_URL }}
+          CLASSROOM_BRIDGE_API_KEY: ${{ secrets.CLASSROOM_BRIDGE_API_KEY }}
           GOOGLE_TOKEN_JSON_B64: ${{ secrets.GOOGLE_TOKEN_JSON_B64 }}
         run: |
-          if [ -n "$GOOGLE_TOKEN_JSON_B64" ]; then
-            echo "configured=true" >> "$GITHUB_OUTPUT"
+          if [ -n "$CLASSROOM_BRIDGE_URL" ] && [ -n "$CLASSROOM_BRIDGE_API_KEY" ]; then
+            echo "mode=portal" >> "$GITHUB_OUTPUT"
+          elif [ -n "$GOOGLE_TOKEN_JSON_B64" ]; then
+            echo "mode=legacy" >> "$GITHUB_OUTPUT"
           else
-            echo "configured=false" >> "$GITHUB_OUTPUT"
-            echo "OAuth secret is not configured; synchronization was skipped."
+            echo "mode=none" >> "$GITHUB_OUTPUT"
+            echo "Classroom authorization is not configured; synchronization was skipped."
           fi
 
+      - name: Request synchronization from OAuth portal
+        if: steps.config.outputs.mode == 'portal'
+        env:
+          CLASSROOM_BRIDGE_URL: ${{ secrets.CLASSROOM_BRIDGE_URL }}
+          CLASSROOM_BRIDGE_API_KEY: ${{ secrets.CLASSROOM_BRIDGE_API_KEY }}
+        run: |
+          endpoint="${CLASSROOM_BRIDGE_URL%/}/sync"
+          status_code="$(curl \
+            --silent \
+            --show-error \
+            --output response.json \
+            --write-out '%{http_code}' \
+            --request POST \
+            --header "X-Bridge-Key: $CLASSROOM_BRIDGE_API_KEY" \
+            "$endpoint")"
+
+          if [ "$status_code" -lt 200 ] || [ "$status_code" -ge 300 ]; then
+            echo "The Classroom portal returned HTTP $status_code."
+            cat response.json
+            exit 1
+          fi
+
+          python - <<'PY'
+          import json
+
+          with open("response.json", encoding="utf-8") as response_file:
+              result = json.load(response_file)
+
+          print(
+              "Classroom sync complete: "
+              f"courses={result.get('courses', 0)}, "
+              f"pending={result.get('pending', 0)}, "
+              f"overdue={result.get('overdue', 0)}"
+          )
+          PY
+
       - name: Checkout
-        if: steps.config.outputs.configured == 'true'
+        if: steps.config.outputs.mode == 'legacy'
         uses: actions/checkout@v4
 
       - name: Set up Python
-        if: steps.config.outputs.configured == 'true'
+        if: steps.config.outputs.mode == 'legacy'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -46,11 +86,11 @@ jobs:
           cache-dependency-path: classroom-bridge/requirements.txt
 
       - name: Install dependencies
-        if: steps.config.outputs.configured == 'true'
+        if: steps.config.outputs.mode == 'legacy'
         run: python -m pip install --requirement classroom-bridge/requirements.txt
 
-      - name: Sync Classroom to private Google Drive
-        if: steps.config.outputs.configured == 'true'
+      - name: Sync using legacy repository secret
+        if: steps.config.outputs.mode == 'legacy'
         env:
           GOOGLE_TOKEN_JSON_B64: ${{ secrets.GOOGLE_TOKEN_JSON_B64 }}
         run: python classroom-bridge/classroom_bridge.py
@@ -61,13 +101,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           JOB_STATUS: ${{ job.status }}
-          CONFIGURED: ${{ steps.config.outputs.configured }}
+          MODE: ${{ steps.config.outputs.mode }}
         run: |
-          if [ "$CONFIGURED" != "true" ]; then
-            gh issue comment "$ISSUE_NUMBER" --body "La autorización de Google todavía no está configurada. Revisa el issue de instalación y agrega el secret GOOGLE_TOKEN_JSON_B64."
+          if [ "$MODE" = "none" ]; then
+            gh issue comment "$ISSUE_NUMBER" --body "La autorización de Google todavía no está configurada. Despliega el portal de inicio de sesión y conecta tu cuenta escolar."
           elif [ "$JOB_STATUS" = "success" ]; then
             gh issue comment "$ISSUE_NUMBER" --body "Sincronización terminada. Los datos se guardaron de forma privada en Google Drive."
           else
-            gh issue comment "$ISSUE_NUMBER" --body "La sincronización falló. Revisa el registro de GitHub Actions y la vigencia del secreto OAuth."
+            gh issue comment "$ISSUE_NUMBER" --body "La sincronización falló. Revisa GitHub Actions y el estado del portal OAuth."
           fi
           gh issue close "$ISSUE_NUMBER" --reason completed
