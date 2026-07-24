@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Classroom Agent</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="panel">
+    <header>
+      <h1>Classroom Agent</h1>
+      <button id="refresh" type="button">Actualizar</button>
+    </header>
+
+    <p id="status" class="status">Consultando la cola…</p>
+
+    <section id="commandCard" class="card" hidden>
+      <dl>
+        <div><dt>Acción</dt><dd id="action"></dd></div>
+        <div><dt>Curso</dt><dd id="course"></dd></div>
+        <div><dt>Actividad</dt><dd id="coursework"></dd></div>
+        <div><dt>Destino</dt><dd id="target"></dd></div>
+        <div><dt>Contenido</dt><dd id="payload"></dd></div>
+      </dl>
+      <p id="warning" class="warning" hidden></p>
+      <div class="actions">
+        <button id="reject" class="secondary" type="button">Rechazar</button>
+        <button id="approve" class="primary" type="button">Aprobar y ejecutar</button>
+      </div>
+    </section>
+
+    <p class="footer"><a href="options.html" target="_blank">Configuración</a></p>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>
