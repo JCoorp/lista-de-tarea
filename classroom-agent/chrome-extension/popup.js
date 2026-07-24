@@ -148,6 +148,7 @@ async function getApi(config, params) {
     method: 'GET',
     redirect: 'follow',
     cache: 'no-store',
+    credentials: 'include',
   });
   return response.json();
 }
@@ -156,6 +157,7 @@ async function postApi(config, body) {
   const response = await fetch(apiUrl(config), {
     method: 'POST',
     redirect: 'follow',
+    credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });

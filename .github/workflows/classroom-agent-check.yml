@@ -4,12 +4,16 @@ on:
   pull_request:
     paths:
       - 'classroom-agent/**'
+      - 'classroom-bridge/apps-script/**'
       - '.github/workflows/classroom-agent-check.yml'
   push:
     branches:
+      - main
       - classroom-agent-v2
+      - apps-script-self-update
     paths:
       - 'classroom-agent/**'
+      - 'classroom-bridge/apps-script/**'
       - '.github/workflows/classroom-agent-check.yml'
 
 jobs:
@@ -22,8 +26,14 @@ jobs:
           node-version: '22'
       - name: Check Apps Script syntax
         run: |
-          cp classroom-agent/apps-script/Agent.gs /tmp/ClassroomAgent.js
-          node --check /tmp/ClassroomAgent.js
+          for file in \
+            classroom-bridge/apps-script/Code.gs \
+            classroom-agent/apps-script/Agent.gs \
+            classroom-agent/apps-script/SelfUpdate.gs; do
+            echo "Checking $file"
+            cp "$file" "/tmp/$(basename "$file").js"
+            node --check "/tmp/$(basename "$file").js"
+          done
       - name: Check extension JavaScript syntax
         run: |
           for file in \
@@ -41,6 +51,7 @@ jobs:
       - name: Verify required files
         run: |
           test -f classroom-agent/README.md
+          test -f classroom-agent/apps-script/SelfUpdate.gs
           test -f classroom-agent/chrome-extension/popup.html
           test -f classroom-agent/chrome-extension/options.html
           test -f classroom-agent/chrome-extension/styles.css
