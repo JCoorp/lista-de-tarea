@@ -1,0 +1,5 @@
+-r requirements.txt
+fastapi>=0.115,<1
+uvicorn[standard]>=0.34,<1
+google-cloud-secret-manager>=2.24,<3
+itsdangerous>=2.2,<3
