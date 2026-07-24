@@ -29,6 +29,7 @@ const SELF_UPDATE_CONFIG = Object.freeze({
   lastErrorProperty: 'CLASSROOM_AGENT_LAST_ERROR',
   deploymentIdProperty: 'CLASSROOM_AGENT_DEPLOYMENT_ID',
   webAppUrlProperty: 'CLASSROOM_AGENT_WEBAPP_URL',
+  webAppAccessProperty: 'CLASSROOM_AGENT_WEBAPP_ACCESS',
   deploymentDescription: 'Classroom Agent V2 automatic',
 });
 
@@ -66,6 +67,7 @@ function getAutomaticUpdateStatus() {
     lastError: props.getProperty(SELF_UPDATE_CONFIG.lastErrorProperty) || '',
     deploymentId: props.getProperty(SELF_UPDATE_CONFIG.deploymentIdProperty) || '',
     webAppUrl: props.getProperty(SELF_UPDATE_CONFIG.webAppUrlProperty) || '',
+    webAppAccess: props.getProperty(SELF_UPDATE_CONFIG.webAppAccessProperty) || 'ANYONE_ANONYMOUS',
   };
 }
 
@@ -78,10 +80,11 @@ function updateClassroomAgentFromGitHub(force) {
 
   const props = PropertiesService.getScriptProperties();
   try {
-    const remoteFiles = selfUpdateDownloadSources_();
-    const sourceHash = selfUpdateHashFiles_(remoteFiles);
+    let access = props.getProperty(SELF_UPDATE_CONFIG.webAppAccessProperty) || 'ANYONE_ANONYMOUS';
+    let remoteFiles = selfUpdateDownloadSources_(access);
+    let sourceHash = selfUpdateHashFiles_(remoteFiles);
     const previousHash = props.getProperty(SELF_UPDATE_CONFIG.sourceHashProperty) || '';
-    const shouldUpdate = Boolean(force) || sourceHash !== previousHash;
+    let shouldUpdate = Boolean(force) || sourceHash !== previousHash;
 
     let contentUpdated = false;
     if (shouldUpdate) {
@@ -90,7 +93,32 @@ function updateClassroomAgentFromGitHub(force) {
       contentUpdated = true;
     }
 
-    const deployment = selfUpdateDeployCurrentHead_(contentUpdated || Boolean(force));
+    let deployment;
+    try {
+      deployment = selfUpdateDeployCurrentHead_(contentUpdated || Boolean(force));
+    } catch (firstDeploymentError) {
+      if (access !== 'ANYONE_ANONYMOUS') throw firstDeploymentError;
+
+      access = 'ANYONE';
+      props.setProperty(SELF_UPDATE_CONFIG.webAppAccessProperty, access);
+      remoteFiles = selfUpdateDownloadSources_(access);
+      sourceHash = selfUpdateHashFiles_(remoteFiles);
+      selfUpdateProjectContent_(remoteFiles);
+      props.setProperty(SELF_UPDATE_CONFIG.sourceHashProperty, sourceHash);
+      contentUpdated = true;
+
+      try {
+        deployment = selfUpdateDeployCurrentHead_(true);
+      } catch (secondDeploymentError) {
+        throw new Error(
+          'Falló el despliegue anónimo y también el despliegue para usuarios autenticados. ' +
+          'Primer error: ' + selfUpdateErrorText_(firstDeploymentError) +
+          ' | Segundo error: ' + selfUpdateErrorText_(secondDeploymentError)
+        );
+      }
+    }
+
+    props.setProperty(SELF_UPDATE_CONFIG.webAppAccessProperty, access);
     const now = new Date().toISOString();
     props.setProperty(SELF_UPDATE_CONFIG.lastUpdateProperty, now);
     props.deleteProperty(SELF_UPDATE_CONFIG.lastErrorProperty);
@@ -101,6 +129,7 @@ function updateClassroomAgentFromGitHub(force) {
       sourceHash: sourceHash,
       deploymentId: deployment.deploymentId || '',
       webAppUrl: deployment.webAppUrl || '',
+      webAppAccess: access,
       checkedAt: now,
     };
   } catch (error) {
@@ -112,8 +141,8 @@ function updateClassroomAgentFromGitHub(force) {
   }
 }
 
-function selfUpdateDownloadSources_() {
-  return SELF_UPDATE_CONFIG.files.map(function (file) {
+function selfUpdateDownloadSources_(webAppAccess) {
+  const files = SELF_UPDATE_CONFIG.files.map(function (file) {
     const separator = file.path.indexOf('?') >= 0 ? '&' : '?';
     const url = SELF_UPDATE_CONFIG.rawBaseUrl + file.path + separator + 'ts=' + Date.now();
     const response = UrlFetchApp.fetch(url, {
@@ -128,13 +157,25 @@ function selfUpdateDownloadSources_() {
     }
     const source = response.getContentText('UTF-8');
     if (!source.trim()) throw new Error('GitHub devolvió vacío: ' + file.path);
-    if (file.type === 'JSON') JSON.parse(source);
     return {
       name: file.name,
       type: file.type,
       source: source,
     };
   });
+
+  const manifestFile = files.find(function (file) {
+    return file.name === 'appsscript' && file.type === 'JSON';
+  });
+  if (!manifestFile) throw new Error('No se encontró appsscript.json en la versión remota.');
+
+  const manifest = JSON.parse(manifestFile.source);
+  manifest.webapp = manifest.webapp || {};
+  manifest.webapp.access = webAppAccess || 'ANYONE_ANONYMOUS';
+  manifest.webapp.executeAs = 'USER_DEPLOYING';
+  manifestFile.source = JSON.stringify(manifest, null, 2) + '\n';
+
+  return files;
 }
 
 function selfUpdateHashFiles_(files) {
