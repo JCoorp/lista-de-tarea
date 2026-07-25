@@ -71,45 +71,92 @@
   }
 
   async function submitAssignment() {
-    const first = await waitForText([
+    const submitLabels = [
       'Entregar',
       'Turn in',
       'Marcar como completada',
       'Mark as done',
-    ], 12000, true);
-    clickElement(first);
-    await sleep(900);
+    ];
 
-    const confirm = findVisibleByText([
-      'Entregar',
-      'Turn in',
-      'Marcar como completada',
-      'Mark as done',
-    ], true);
-    if (confirm && confirm !== first) {
-      clickElement(confirm);
-      await sleep(1600);
+    const first = await waitForText(submitLabels, 12000, true);
+    clickElement(first);
+
+    const nextStep = await waitUntil(() => {
+      if (isSubmittedState()) return { alreadySubmitted: true };
+
+      const dialog = findVisibleDialog();
+      if (!dialog) return null;
+
+      const confirmButton = findVisibleByTextWithin(dialog, submitLabels, true);
+      return confirmButton ? { confirmButton } : null;
+    }, 10000, 'No encontré la ventana de confirmación para entregar o marcar como completada.');
+
+    if (nextStep.confirmButton) {
+      clickElement(nextStep.confirmButton);
     }
+
+    await waitUntil(
+      () => isSubmittedState(),
+      12000,
+      'Classroom no confirmó que la actividad quedara entregada o marcada como completada.',
+    );
   }
 
   async function reclaimAssignment() {
-    const first = await waitForText([
+    const reclaimLabels = [
       'Anular entrega',
       'Cancelar entrega',
       'Unsubmit',
-    ], 12000, true);
-    clickElement(first);
-    await sleep(900);
+      'Desmarcar como completada',
+      'Unmark as done',
+    ];
 
-    const confirm = findVisibleByText([
+    const first = await waitForText(reclaimLabels, 12000, true);
+    clickElement(first);
+
+    const nextStep = await waitUntil(() => {
+      if (isAssignableState()) return { alreadyReclaimed: true };
+
+      const dialog = findVisibleDialog();
+      if (!dialog) return null;
+
+      const confirmButton = findVisibleByTextWithin(dialog, reclaimLabels, true);
+      return confirmButton ? { confirmButton } : null;
+    }, 10000, 'No encontré la ventana de confirmación para anular la entrega.');
+
+    if (nextStep.confirmButton) {
+      clickElement(nextStep.confirmButton);
+    }
+
+    await waitUntil(
+      () => isAssignableState(),
+      12000,
+      'Classroom no confirmó que la entrega quedara anulada.',
+    );
+  }
+
+  function isSubmittedState() {
+    return Boolean(findVisibleByText([
       'Anular entrega',
       'Cancelar entrega',
       'Unsubmit',
-    ], true);
-    if (confirm && confirm !== first) {
-      clickElement(confirm);
-      await sleep(1400);
-    }
+      'Desmarcar como completada',
+      'Unmark as done',
+    ], true));
+  }
+
+  function isAssignableState() {
+    return Boolean(findVisibleByText([
+      'Entregar',
+      'Turn in',
+      'Marcar como completada',
+      'Mark as done',
+    ], true));
+  }
+
+  function findVisibleDialog() {
+    const dialogs = Array.from(document.querySelectorAll('[role="dialog"],[aria-modal="true"]'));
+    return dialogs.find(isVisible) || null;
   }
 
   function capturePage() {
@@ -149,11 +196,15 @@
   }
 
   function findVisibleByText(labels, preferButton = false) {
+    return findVisibleByTextWithin(document, labels, preferButton);
+  }
+
+  function findVisibleByTextWithin(root, labels, preferButton = false) {
     const normalizedLabels = labels.map(normalize);
     const selectors = preferButton
       ? 'button,[role="button"],[role="menuitem"]'
       : 'button,[role="button"],[role="menuitem"],span,div';
-    const nodes = Array.from(document.querySelectorAll(selectors)).filter(isVisible);
+    const nodes = Array.from(root.querySelectorAll(selectors)).filter(isVisible);
 
     const exact = nodes.find((node) => {
       const text = normalize(node.innerText || node.getAttribute('aria-label') || '');
