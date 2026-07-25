@@ -26,8 +26,13 @@ test.addEventListener('click', async () => {
     const response = await fetch(url.toString(), {
       redirect: 'follow',
       cache: 'no-store',
-      credentials: 'include',
+      credentials: 'omit',
     });
+    const contentType = response.headers.get('content-type') || '';
+    if (!contentType.toLowerCase().includes('application/json')) {
+      const preview = (await response.text()).slice(0, 120).replace(/\s+/g, ' ');
+      throw new Error(`Apps Script devolvió HTML en lugar de JSON (${response.status}): ${preview}`);
+    }
     const data = await response.json();
     if (!data.ok) throw new Error(data.error || 'El agente no respondió correctamente.');
     status.textContent = 'Conexión correcta.';
