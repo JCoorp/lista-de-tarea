@@ -104,7 +104,9 @@
 
   async function reclaimAssignment() {
     const reclaimLabels = [
+      'Anular la entrega',
       'Anular entrega',
+      'Cancelar la entrega',
       'Cancelar entrega',
       'Unsubmit',
       'Desmarcar como completada',
@@ -137,7 +139,9 @@
 
   function isSubmittedState() {
     return Boolean(findVisibleByText([
+      'Anular la entrega',
       'Anular entrega',
+      'Cancelar la entrega',
       'Cancelar entrega',
       'Unsubmit',
       'Desmarcar como completada',
