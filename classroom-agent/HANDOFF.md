@@ -46,6 +46,23 @@ Conectar ChatGPT con Google Classroom mediante una cola privada de comandos, App
 - El comando seguro `capture_page` se ejecutó correctamente.
 - La captura confirmó el uso de `carlosjm.ti23@utsjr.edu.mx` y mostró los cursos escolares reales.
 
+## Política de filtrado de actividades
+
+A partir del 24 de julio de 2026, al responder preguntas sobre actividades pendientes, solo se consideran relevantes:
+
+1. Actividades sin fecha límite.
+2. Actividades con vencimiento durante la semana actual.
+3. Actividades con vencimiento durante la semana siguiente.
+4. Actividades con vencimiento posterior a la semana siguiente.
+
+Reglas:
+
+- La semana se interpreta de lunes a domingo en la zona horaria `America/Mexico_City`.
+- Las actividades cuya fecha límite ya pasó se excluyen por defecto, aunque Classroom todavía las marque como pendientes.
+- Solo se mostrarán actividades atrasadas cuando el usuario las solicite explícitamente.
+- Los resultados deben agruparse como `Sin fecha`, `Esta semana`, `Semana siguiente` y `Más adelante`.
+- Antes de responder, se debe sincronizar o consultar el índice más reciente; no usar cifras históricas como si fueran actuales.
+
 ## Flujo operativo
 
 1. ChatGPT lee el índice profundo de Drive cuando el usuario pregunta por tareas.
@@ -101,8 +118,9 @@ El asistente debe:
 1. Leer este archivo desde GitHub.
 2. Consultar la hoja de comandos actual.
 3. Consultar el índice profundo más reciente de Drive.
-4. No asumir que las cifras de pendientes siguen vigentes; deben actualizarse antes de responder.
-5. No pedir el token salvo que sea necesario reconfigurar la extensión.
+4. Aplicar la política de filtrado de actividades definida en este archivo.
+5. No asumir que las cifras de pendientes siguen vigentes; deben actualizarse antes de responder.
+6. No pedir el token salvo que sea necesario reconfigurar la extensión.
 
 ## Actualizaciones
 
