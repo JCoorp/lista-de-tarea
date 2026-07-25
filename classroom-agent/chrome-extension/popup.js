@@ -148,19 +148,28 @@ async function getApi(config, params) {
     method: 'GET',
     redirect: 'follow',
     cache: 'no-store',
-    credentials: 'include',
+    credentials: 'omit',
   });
-  return response.json();
+  return parseJsonResponse(response);
 }
 
 async function postApi(config, body) {
   const response = await fetch(apiUrl(config), {
     method: 'POST',
     redirect: 'follow',
-    credentials: 'include',
+    credentials: 'omit',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
+  return parseJsonResponse(response);
+}
+
+async function parseJsonResponse(response) {
+  const contentType = response.headers.get('content-type') || '';
+  if (!contentType.toLowerCase().includes('application/json')) {
+    const preview = (await response.text()).slice(0, 120).replace(/\s+/g, ' ');
+    throw new Error(`Apps Script devolvió HTML en lugar de JSON (${response.status}): ${preview}`);
+  }
   return response.json();
 }
 
