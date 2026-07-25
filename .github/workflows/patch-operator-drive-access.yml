@@ -1,0 +1,91 @@
+name: Patch Operator Drive Access
+
+on:
+  push:
+    branches:
+      - operator-drive-access
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: operator-drive-access
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Patch Agent.gs
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('classroom-agent/apps-script/Agent.gs')
+          source = path.read_text(encoding='utf-8')
+
+          expected = "  expectedEmail: 'carlosjm.ti23@utsjr.edu.mx',"
+          operator = "  operatorEmail: 'chatgptusejc@gmail.com',"
+          if operator not in source:
+              if expected not in source:
+                  raise SystemExit('No se encontró expectedEmail en Agent.gs')
+              source = source.replace(expected, expected + '\n' + operator, 1)
+
+          old_spreadsheet = """  props.setProperty('AGENT_COMMAND_SPREADSHEET_ID', spreadsheet.getId());
+  agentInitializeSpreadsheet_(spreadsheet);
+  return spreadsheet;
+"""
+          new_spreadsheet = """  props.setProperty('AGENT_COMMAND_SPREADSHEET_ID', spreadsheet.getId());
+  agentInitializeSpreadsheet_(spreadsheet);
+  try {
+    DriveApp.getFileById(spreadsheet.getId()).addEditor(AGENT_CONFIG.operatorEmail);
+  } catch (error) {
+    Logger.log('No se pudo compartir la hoja de comandos con el operador: ' + agentErrorText_(error));
+  }
+  return spreadsheet;
+"""
+          if new_spreadsheet not in source:
+              if old_spreadsheet not in source:
+                  raise SystemExit('No se encontró el bloque de la hoja de comandos')
+              source = source.replace(old_spreadsheet, new_spreadsheet, 1)
+
+          old_folder = """function agentGetOrCreateFolder_() {
+  const folders = DriveApp.getFoldersByName(AGENT_CONFIG.dataFolderName);
+  return folders.hasNext() ? folders.next() : DriveApp.createFolder(AGENT_CONFIG.dataFolderName);
+}
+"""
+          new_folder = """function agentGetOrCreateFolder_() {
+  const folders = DriveApp.getFoldersByName(AGENT_CONFIG.dataFolderName);
+  const folder = folders.hasNext() ? folders.next() : DriveApp.createFolder(AGENT_CONFIG.dataFolderName);
+  try {
+    folder.addEditor(AGENT_CONFIG.operatorEmail);
+  } catch (error) {
+    Logger.log('No se pudo compartir la carpeta con el operador: ' + agentErrorText_(error));
+  }
+  return folder;
+}
+"""
+          if new_folder not in source:
+              if old_folder not in source:
+                  raise SystemExit('No se encontró el bloque de carpeta')
+              source = source.replace(old_folder, new_folder, 1)
+
+          path.write_text(source, encoding='utf-8')
+          PY
+      - name: Validate syntax
+        run: |
+          cp classroom-agent/apps-script/Agent.gs /tmp/Agent.js
+          node --check /tmp/Agent.js
+      - name: Commit patch
+        run: |
+          if git diff --quiet; then
+            echo "No changes required."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add classroom-agent/apps-script/Agent.gs
+          git commit -m "Share Classroom agent data with ChatGPT Drive operator"
+          git push origin operator-drive-access
