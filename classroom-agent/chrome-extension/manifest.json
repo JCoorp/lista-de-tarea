@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "ChatGPT Classroom Agent",
-  "version": "0.1.3",
-  "description": "Lee la página actual de Classroom y ejecuta acciones confirmadas desde una cola privada.",
+  "version": "0.2.0",
+  "description": "Ejecuta en segundo plano acciones de Classroom autorizadas desde una cola privada.",
   "permissions": [
     "alarms",
     "storage",
