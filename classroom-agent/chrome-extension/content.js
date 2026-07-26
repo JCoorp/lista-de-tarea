@@ -1,5 +1,5 @@
 (() => {
-  const AGENT_VERSION = '0.3.3';
+  const AGENT_VERSION = '0.3.4';
   if (window.__chatgptClassroomAgentVersion === AGENT_VERSION) return;
   window.__chatgptClassroomAgentVersion = AGENT_VERSION;
 
@@ -61,6 +61,9 @@
 
   async function executeCommand(command) {
     const action = String(command?.action || '').toLowerCase();
+    const fileName = command?.payload?.fileName || '';
+    const attachmentUrl = command?.payload?.url || command?.payload?.attachmentUrl || '';
+
     if (action === 'open_activity') {
       return { ok: true, action, snapshot: capturePage() };
     }
@@ -68,10 +71,7 @@
       return { ok: true, action, snapshot: capturePage() };
     }
     if (action === 'attach_link') {
-      await attachLink(
-        command.payload?.url || command.payload?.attachmentUrl || '',
-        command.payload?.fileName || '',
-      );
+      await attachLink(attachmentUrl, fileName);
       return { ok: true, action, snapshot: capturePage() };
     }
     if (action === 'submit') {
@@ -79,15 +79,21 @@
       return { ok: true, action, snapshot: capturePage() };
     }
     if (action === 'attach_and_submit') {
-      await attachLink(
-        command.payload?.url || command.payload?.attachmentUrl || '',
-        command.payload?.fileName || '',
-      );
+      await attachLink(attachmentUrl, fileName);
       await submitAssignment();
       return { ok: true, action, snapshot: capturePage() };
     }
     if (action === 'reclaim') {
       await reclaimAssignment();
+      return { ok: true, action, snapshot: capturePage() };
+    }
+    if (action === 'remove_attachment') {
+      await removeAttachment(fileName, attachmentUrl);
+      return { ok: true, action, snapshot: capturePage() };
+    }
+    if (action === 'reclaim_and_remove_attachment') {
+      await reclaimAssignment();
+      await removeAttachment(fileName, attachmentUrl);
       return { ok: true, action, snapshot: capturePage() };
     }
     throw new Error(`Acción no compatible: ${action}`);
@@ -139,16 +145,11 @@
     );
 
     const fileId = extractDriveFileId(url);
-    await waitUntil(() => {
-      const visibleText = cleanText(document.body?.innerText || '');
-      if (fileName && visibleText.includes(fileName)) return true;
-      if (fileId) {
-        return Array.from(document.querySelectorAll('a[href]'))
-          .filter(isVisible)
-          .some((anchor) => String(anchor.href || '').includes(fileId));
-      }
-      return false;
-    }, 20000, 'Classroom no confirmó que el vínculo quedara adjunto.');
+    await waitUntil(
+      () => attachmentExists(fileName, fileId),
+      20000,
+      'Classroom no confirmó que el vínculo quedara adjunto.',
+    );
   }
 
   async function submitAssignment() {
@@ -234,6 +235,115 @@
       15000,
       'Classroom no confirmó que la entrega quedara anulada.',
     );
+  }
+
+  async function removeAttachment(fileName = '', url = '') {
+    if (isSubmittedState()) {
+      throw new Error('La entrega sigue enviada; primero debe anularse antes de eliminar el archivo adjunto.');
+    }
+
+    const fileId = extractDriveFileId(url);
+    if (!attachmentExists(fileName, fileId)) return;
+
+    const removeButton = await waitUntil(
+      () => findRemoveAttachmentButton(fileName, fileId),
+      12000,
+      'No encontré el botón para eliminar el archivo adjunto.',
+    );
+
+    await activateElement(removeButton);
+
+    const confirmLabels = [
+      'Eliminar',
+      'Quitar',
+      'Remove',
+      'Delete',
+      'Eliminar archivo adjunto',
+      'Quitar archivo adjunto',
+    ];
+
+    await sleep(500);
+    if (attachmentExists(fileName, fileId)) {
+      const dialog = findVisibleDialog();
+      const confirmButton = dialog
+        ? findVisibleByTextWithin(dialog, confirmLabels, true)
+        : null;
+      if (confirmButton && confirmButton !== removeButton) {
+        await activateElement(confirmButton);
+      }
+    }
+
+    await waitUntil(
+      () => !attachmentExists(fileName, fileId),
+      20000,
+      'Classroom no confirmó que el archivo adjunto fuera eliminado.',
+    );
+  }
+
+  function attachmentExists(fileName = '', fileId = '') {
+    const normalizedName = normalize(fileName);
+    const nameStem = normalizedName.replace(/\.[a-z0-9]{1,8}$/i, '');
+
+    if (fileId) {
+      const matchingAnchor = Array.from(document.querySelectorAll('a[href]'))
+        .filter(isVisible)
+        .some((anchor) => String(anchor.href || '').includes(fileId));
+      if (matchingAnchor) return true;
+    }
+
+    if (normalizedName) {
+      const bodyText = normalize(document.body?.innerText || '');
+      if (bodyText.includes(normalizedName)) return true;
+      if (nameStem.length >= 12 && bodyText.includes(nameStem)) return true;
+    }
+
+    return false;
+  }
+
+  function findRemoveAttachmentButton(fileName = '', fileId = '') {
+    const normalizedName = normalize(fileName);
+    const nameStem = normalizedName.replace(/\.[a-z0-9]{1,8}$/i, '');
+    const removeWords = ['eliminar', 'quitar', 'remove', 'delete'];
+    const buttons = Array.from(document.querySelectorAll('button,[role="button"]'))
+      .filter(isVisible)
+      .map(closestInteractive)
+      .filter((node, index, all) => all.indexOf(node) === index)
+      .filter((node) => !node.disabled && node.getAttribute('aria-disabled') !== 'true');
+
+    const direct = buttons.find((button) => {
+      const text = normalize(button.innerText || button.getAttribute('aria-label') || '');
+      const isRemove = removeWords.some((word) => text.includes(word));
+      if (!isRemove) return false;
+      if (!normalizedName && !fileId) return true;
+      if (normalizedName && text.includes(normalizedName)) return true;
+      if (nameStem.length >= 12 && text.includes(nameStem)) return true;
+      return false;
+    });
+    if (direct) return direct;
+
+    if (fileId) {
+      const anchor = Array.from(document.querySelectorAll('a[href]'))
+        .filter(isVisible)
+        .find((item) => String(item.href || '').includes(fileId));
+      if (anchor) {
+        let container = anchor;
+        for (let level = 0; level < 6 && container; level += 1) {
+          const candidate = Array.from(container.querySelectorAll?.('button,[role="button"]') || [])
+            .filter(isVisible)
+            .find((button) => {
+              const text = normalize(button.innerText || button.getAttribute('aria-label') || '');
+              return removeWords.some((word) => text.includes(word));
+            });
+          if (candidate) return closestInteractive(candidate);
+          container = container.parentElement;
+        }
+      }
+    }
+
+    return buttons.find((button) => {
+      const text = normalize(button.innerText || button.getAttribute('aria-label') || '');
+      return removeWords.some((word) => text.startsWith(word));
+    }) || null;
   }
 
   function isSubmittedState() {
