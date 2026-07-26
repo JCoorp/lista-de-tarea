@@ -1,5 +1,5 @@
 (() => {
-  const AGENT_VERSION = '0.3.2';
+  const AGENT_VERSION = '0.3.3';
   if (window.__chatgptClassroomAgentVersion === AGENT_VERSION) return;
   window.__chatgptClassroomAgentVersion = AGENT_VERSION;
 
@@ -157,34 +157,32 @@
       'Turn in',
       'Marcar como completada',
       'Mark as done',
+      'Entregar trabajo',
+      'Turn in assignment',
     ];
 
     if (isSubmittedState()) return;
 
-    const first = await waitForText(submitLabels, 12000, true);
-    await activateElement(first);
+    const firstButton = await waitForText(submitLabels, 12000, true);
 
-    const nextStep = await waitUntil(() => {
-      if (isSubmittedState()) return { alreadySubmitted: true };
+    await clickUntilEffect(
+      () => {
+        if (firstButton && document.contains(firstButton) && isVisible(firstButton)) return firstButton;
+        return findVisibleByText(submitLabels, true);
+      },
+      () => isSubmittedState() || Boolean(findConfirmationButton(submitLabels, firstButton)),
+      15000,
+      'Classroom no reaccionó al botón para entregar la actividad.',
+    );
 
-      const dialog = findVisibleDialog();
-      if (!dialog) return null;
+    if (isSubmittedState()) return;
 
-      const confirmButton = findVisibleByTextWithin(dialog, submitLabels, true);
-      return confirmButton ? { confirmButton } : null;
-    }, 12000, 'No encontré la ventana de confirmación para entregar o marcar como completada.');
-
-    if (nextStep.confirmButton) {
-      await clickUntilEffect(
-        () => {
-          const dialog = findVisibleDialog();
-          return dialog ? findVisibleByTextWithin(dialog, submitLabels, true) : null;
-        },
-        () => isSubmittedState(),
-        18000,
-        'Classroom no confirmó la entrega después de varios intentos.',
-      );
-    }
+    await clickUntilEffect(
+      () => findConfirmationButton(submitLabels, firstButton),
+      () => isSubmittedState(),
+      20000,
+      'Classroom no confirmó la entrega después de varios intentos.',
+    );
 
     await waitUntil(
       () => isSubmittedState(),
@@ -260,8 +258,33 @@
   }
 
   function findVisibleDialog() {
-    const dialogs = Array.from(document.querySelectorAll('[role="dialog"],[aria-modal="true"]'));
+    const dialogs = Array.from(document.querySelectorAll(
+      '[role="dialog"],[role="alertdialog"],[aria-modal="true"]',
+    ));
     return dialogs.find(isVisible) || null;
+  }
+
+  function findConfirmationButton(labels, originalButton) {
+    const normalizedLabels = labels.map(normalize);
+    const candidates = Array.from(document.querySelectorAll('button,[role="button"]'))
+      .filter(isVisible)
+      .map(closestInteractive)
+      .filter((node, index, all) => all.indexOf(node) === index)
+      .filter((node) => {
+        const text = normalize(node.innerText || node.getAttribute('aria-label') || '');
+        return normalizedLabels.some((label) => text === label || text.includes(label));
+      })
+      .filter((node) => node !== originalButton)
+      .filter((node) => !node.disabled && node.getAttribute('aria-disabled') !== 'true');
+
+    if (!candidates.length) return null;
+
+    const modalCandidate = candidates.find((node) => node.closest(
+      '[role="dialog"],[role="alertdialog"],[aria-modal="true"],[data-mdc-dialog-action]',
+    ));
+    if (modalCandidate) return modalCandidate;
+
+    return candidates[candidates.length - 1];
   }
 
   function capturePage() {
@@ -351,7 +374,11 @@
     try { target.dispatchEvent(new PointerEvent('pointerup', { ...mouseOptions, buttons: 0 })); } catch (error) {}
     target.dispatchEvent(new MouseEvent('mouseup', { ...mouseOptions, buttons: 0 }));
     target.click();
-    await sleep(350);
+    try {
+      target.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter', code: 'Enter' }));
+      target.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Enter', code: 'Enter' }));
+    } catch (error) {}
+    await sleep(500);
   }
 
   async function clickUntilEffect(getNode, effect, timeoutMs, errorMessage) {
@@ -365,7 +392,7 @@
         await sleep(300);
       }
       if (effect()) return true;
-      await sleep(500);
+      await sleep(600);
     }
     throw new Error(errorMessage);
   }
