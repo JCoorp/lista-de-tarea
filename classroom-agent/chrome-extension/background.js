@@ -2,6 +2,7 @@ const POLL_ALARM = 'chatgpt-classroom-agent-poll';
 const POLL_MINUTES = 1;
 const MAX_COMMANDS_PER_CYCLE = 3;
 const CLASSROOM_READY_TIMEOUT_MS = 65000;
+const COMMAND_OUTCOME_TIMEOUT_MS = 90000;
 let pollInFlight = false;
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -24,10 +25,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   if (message?.type === 'run-background-poll') {
-    pollAuthorizedCommands()
-      .then(() => sendResponse({ ok: true }))
-      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
-    return true;
+    sendResponse({ ok: true, started: true });
+    void pollAuthorizedCommands();
+    return false;
   }
   return false;
 });
@@ -152,24 +152,16 @@ async function executeApprovedCommand(command, options = {}) {
   try {
     await waitForTab(tab.id, 35000);
     await ensureClassroomReady(tab.id, targetUrl, CLASSROOM_READY_TIMEOUT_MS);
-    await sleep(750);
+    await ensureContentScript(tab.id);
 
-    try {
-      return await chrome.tabs.sendMessage(tab.id, {
-        type: 'execute-classroom-command',
-        command,
-      });
-    } catch (error) {
-      await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        files: ['content.js'],
-      });
-      await sleep(900);
-      return chrome.tabs.sendMessage(tab.id, {
-        type: 'execute-classroom-command',
-        command,
-      });
+    const action = String(command?.action || '').toLowerCase();
+    if (action === 'open_activity' || action === 'capture_page') {
+      const snapshot = await captureClassroomPage(tab.id);
+      return { ok: true, action, snapshot };
     }
+
+    startClassroomCommand(tab.id, command);
+    return await waitForCommandOutcome(tab.id, command, COMMAND_OUTCOME_TIMEOUT_MS);
   } finally {
     if (backgroundTab && createdTab) {
       try {
@@ -180,6 +172,100 @@ async function executeApprovedCommand(command, options = {}) {
       }
     }
   }
+}
+
+async function ensureContentScript(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: ['content.js'],
+  });
+  await sleep(450);
+}
+
+function startClassroomCommand(tabId, command) {
+  chrome.tabs.sendMessage(tabId, {
+    type: 'execute-classroom-command',
+    command,
+  }).catch(() => {
+    // The content script may finish after its one-shot response channel closes.
+    // Completion is verified independently from the rendered Classroom page.
+  });
+}
+
+async function waitForCommandOutcome(tabId, command, timeoutMs) {
+  const started = Date.now();
+  const action = String(command?.action || '').toLowerCase();
+  let lastState = null;
+
+  while (Date.now() - started < timeoutMs) {
+    await sleep(750);
+    lastState = await inspectCommandState(tabId, command);
+
+    if (action === 'attach_link' && lastState.attached) {
+      return { ok: true, action, snapshot: lastState.snapshot };
+    }
+    if (action === 'submit' && lastState.submitted) {
+      return { ok: true, action, snapshot: lastState.snapshot };
+    }
+    if (action === 'attach_and_submit' && lastState.attached && lastState.submitted) {
+      return { ok: true, action, snapshot: lastState.snapshot };
+    }
+    if (action === 'reclaim' && lastState.assignable && !lastState.submitted) {
+      return { ok: true, action, snapshot: lastState.snapshot };
+    }
+  }
+
+  const snapshot = lastState?.snapshot || await captureClassroomPage(tabId);
+  throw new Error(buildOutcomeError(action, lastState, snapshot));
+}
+
+function buildOutcomeError(action, state, snapshot) {
+  const details = [];
+  if (action === 'attach_link' || action === 'attach_and_submit') {
+    details.push(state?.attached ? 'el archivo sí aparece adjunto' : 'el archivo no aparece adjunto');
+  }
+  if (action === 'submit' || action === 'attach_and_submit') {
+    details.push(state?.submitted ? 'la actividad aparece entregada' : 'la actividad no aparece entregada');
+  }
+  if (action === 'reclaim') {
+    details.push(state?.assignable ? 'la actividad volvió a estar asignada' : 'la entrega no se anuló');
+  }
+  const pageTitle = snapshot?.title ? ` Página: ${snapshot.title}.` : '';
+  return `Classroom no confirmó el resultado esperado (${details.join('; ') || action}).${pageTitle}`;
+}
+
+async function inspectCommandState(tabId, command) {
+  const snapshot = await captureClassroomPage(tabId);
+  const normalized = normalize(snapshot.text || '');
+  const links = Array.isArray(snapshot.links) ? snapshot.links : [];
+  const fileName = String(command?.payload?.fileName || '').trim();
+  const fileId = extractDriveFileId(command?.payload?.url || command?.payload?.attachmentUrl || '');
+
+  const submittedLabels = [
+    'anular la entrega',
+    'anular entrega',
+    'cancelar la entrega',
+    'cancelar entrega',
+    'unsubmit',
+    'desmarcar como completada',
+    'unmark as done',
+  ];
+  const assignableLabels = [
+    'entregar',
+    'turn in',
+    'marcar como completada',
+    'mark as done',
+  ];
+
+  const attachedByName = Boolean(fileName && normalized.includes(normalize(fileName)));
+  const attachedById = Boolean(fileId && links.some((item) => String(item.url || '').includes(fileId)));
+
+  return {
+    attached: attachedByName || attachedById,
+    submitted: submittedLabels.some((label) => normalized.includes(label)),
+    assignable: assignableLabels.some((label) => normalized.includes(label)),
+    snapshot,
+  };
 }
 
 async function ensureClassroomReady(tabId, targetUrl, timeoutMs) {
@@ -246,6 +332,51 @@ async function inspectClassroomTab(tabId) {
   } catch (error) {
     return { ready: false, loginRequired: false, url: '', error: error.message || String(error) };
   }
+}
+
+async function captureClassroomPage(tabId) {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => {
+      const isVisible = (node) => {
+        if (!node) return false;
+        const style = getComputedStyle(node);
+        const rect = node.getBoundingClientRect();
+        return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+      };
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const links = Array.from(document.querySelectorAll('a[href]'))
+        .filter(isVisible)
+        .slice(0, 300)
+        .map((anchor) => ({
+          text: clean(anchor.innerText || anchor.getAttribute('aria-label') || ''),
+          url: anchor.href,
+        }))
+        .filter((item) => item.text || item.url);
+      const buttons = Array.from(document.querySelectorAll('button,[role="button"]'))
+        .filter(isVisible)
+        .slice(0, 150)
+        .map((button) => clean(button.innerText || button.getAttribute('aria-label') || ''))
+        .filter(Boolean);
+      return {
+        url: location.href,
+        title: document.title,
+        text: clean(document.body?.innerText || '').slice(0, 60000),
+        links,
+        buttons,
+      };
+    },
+  });
+  return results?.[0]?.result || { url: '', title: '', text: '', links: [], buttons: [] };
+}
+
+function extractDriveFileId(url) {
+  const match = String(url || '').match(/\/d\/([A-Za-z0-9_-]+)/);
+  return match ? match[1] : '';
+}
+
+function normalize(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('es-MX');
 }
 
 function waitForTab(tabId, timeoutMs) {
