@@ -1,8 +1,9 @@
 const POLL_ALARM = 'chatgpt-classroom-agent-poll';
+const JOB_TIMEOUT_PREFIX = 'chatgpt-classroom-agent-timeout:';
 const POLL_MINUTES = 1;
-const MAX_COMMANDS_PER_CYCLE = 3;
+const JOB_TIMEOUT_MINUTES = 3;
 const CLASSROOM_READY_TIMEOUT_MS = 65000;
-const COMMAND_OUTCOME_TIMEOUT_MS = 90000;
+const ACTIVE_JOBS_KEY = 'classroomActiveJobs';
 let pollInFlight = false;
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -14,21 +15,37 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === POLL_ALARM) void pollAuthorizedCommands();
+  if (alarm.name === POLL_ALARM) {
+    void pollAuthorizedCommands();
+    return;
+  }
+  if (alarm.name.startsWith(JOB_TIMEOUT_PREFIX)) {
+    const commandId = alarm.name.slice(JOB_TIMEOUT_PREFIX.length);
+    void failTimedOutJob(commandId);
+  }
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message?.type === 'execute-approved-command') {
-    executeApprovedCommand(message.command, { backgroundTab: false })
-      .then(sendResponse)
-      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
-    return true;
-  }
   if (message?.type === 'run-background-poll') {
     sendResponse({ ok: true, started: true });
     void pollAuthorizedCommands();
     return false;
   }
+
+  if (message?.type === 'execute-approved-command') {
+    sendResponse({ ok: true, started: true });
+    void launchManualCommand(message.command).catch((error) => {
+      void setBadge('×', '#b91c1c', error.message || String(error));
+    });
+    return false;
+  }
+
+  if (message?.type === 'classroom-command-finished') {
+    sendResponse({ ok: true, accepted: true });
+    void finishDetachedCommand(message.commandId, message.result, sender.tab?.id);
+    return false;
+  }
+
   return false;
 });
 
@@ -39,6 +56,7 @@ async function initializeBackgroundAgent() {
     delayInMinutes: 0.1,
     periodInMinutes: POLL_MINUTES,
   });
+  await recoverActiveJobs();
   await pollAuthorizedCommands();
 }
 
@@ -53,66 +71,36 @@ async function pollAuthorizedCommands() {
       return;
     }
 
-    for (let index = 0; index < MAX_COMMANDS_PER_CYCLE; index += 1) {
-      const data = await getApi(config, { action: 'next' });
-      if (!data.ok) throw new Error(data.error || 'El servidor devolvió un error.');
-      if (!data.command) {
-        await clearBadge();
-        break;
-      }
-
-      const command = data.command;
-      if (!isAutoAuthorized(command)) {
-        await setBadge('!', '#c0841a', 'Hay una acción pendiente de aprobación manual.');
-        break;
-      }
-
-      const claim = await postApi(config, {
-        action: 'claim',
-        commandId: command.commandId,
-      });
-      if (!claim.ok) {
-        if (claim.status === 'claimed' || claim.status === 'completed') continue;
-        throw new Error(claim.error || 'No se pudo reclamar la acción automática.');
-      }
-
-      let result;
-      try {
-        result = await executeApprovedCommand(command, { backgroundTab: true });
-      } catch (error) {
-        result = {
-          ok: false,
-          error: error.message || String(error),
-        };
-      }
-
-      if (result?.snapshot) {
-        await postApi(config, {
-          action: 'snapshot',
-          commandId: command.commandId,
-          ...result.snapshot,
-        });
-      }
-
-      const report = await postApi(config, {
-        action: 'result',
-        commandId: command.commandId,
-        ok: Boolean(result?.ok),
-        status: result?.ok ? 'completed' : 'failed',
-        result: result || {},
-        error: result?.error || '',
-      });
-      if (!report.ok) throw new Error(report.error || 'No se pudo registrar el resultado automático.');
-
-      if (result?.ok) {
-        await setBadge('✓', '#2f855a', 'Última acción automática completada.');
-      } else {
-        await setBadge('×', '#b91c1c', result?.error || 'La acción automática falló.');
-        break;
-      }
-
-      await sleep(750);
+    const jobs = await getActiveJobs();
+    if (Object.keys(jobs).length > 0) {
+      await setBadge('…', '#2563eb', 'Hay una acción automática en ejecución.');
+      return;
     }
+
+    const data = await getApi(config, { action: 'next' });
+    if (!data.ok) throw new Error(data.error || 'El servidor devolvió un error.');
+    if (!data.command) {
+      await clearBadge();
+      return;
+    }
+
+    const command = data.command;
+    if (!isAutoAuthorized(command)) {
+      await setBadge('!', '#c0841a', 'Hay una acción pendiente de aprobación manual.');
+      return;
+    }
+
+    const claim = await postApi(config, {
+      action: 'claim',
+      commandId: command.commandId,
+    });
+    if (!claim.ok) {
+      if (claim.status === 'claimed' || claim.status === 'completed') return;
+      throw new Error(claim.error || 'No se pudo reclamar la acción automática.');
+    }
+
+    await launchDetachedCommand(command, { backgroundTab: true });
+    await setBadge('…', '#2563eb', 'Acción automática en ejecución.');
   } catch (error) {
     await setBadge('×', '#b91c1c', error.message || String(error));
   } finally {
@@ -125,25 +113,26 @@ function isAutoAuthorized(command) {
   return payload.autoAuthorized === true || payload.auto_authorized === true;
 }
 
-async function executeApprovedCommand(command, options = {}) {
-  const targetUrl = command.targetUrl
-    || command.payload?.targetUrl
-    || command.payload?.alternateLink
+async function launchManualCommand(command) {
+  await launchDetachedCommand(command, { backgroundTab: false });
+}
+
+async function launchDetachedCommand(command, options = {}) {
+  const targetUrl = command?.targetUrl
+    || command?.payload?.targetUrl
+    || command?.payload?.alternateLink
     || 'https://classroom.google.com/';
 
   const backgroundTab = Boolean(options.backgroundTab);
   let tab;
-  let createdTab = false;
 
   if (backgroundTab) {
     tab = await chrome.tabs.create({ url: targetUrl, active: false });
-    createdTab = true;
   } else {
     const tabs = await chrome.tabs.query({ url: 'https://classroom.google.com/*' });
     tab = tabs.find((item) => item.active) || tabs[0];
     if (!tab) {
       tab = await chrome.tabs.create({ url: targetUrl, active: true });
-      createdTab = true;
     } else {
       tab = await chrome.tabs.update(tab.id, { url: targetUrl, active: true });
     }
@@ -154,118 +143,154 @@ async function executeApprovedCommand(command, options = {}) {
     await ensureClassroomReady(tab.id, targetUrl, CLASSROOM_READY_TIMEOUT_MS);
     await ensureContentScript(tab.id);
 
-    const action = String(command?.action || '').toLowerCase();
-    if (action === 'open_activity' || action === 'capture_page') {
-      const snapshot = await captureClassroomPage(tab.id);
-      return { ok: true, action, snapshot };
+    await saveActiveJob(command.commandId, {
+      command,
+      tabId: tab.id,
+      backgroundTab,
+      startedAt: Date.now(),
+    });
+
+    await chrome.alarms.create(`${JOB_TIMEOUT_PREFIX}${command.commandId}`, {
+      delayInMinutes: JOB_TIMEOUT_MINUTES,
+    });
+
+    const acknowledgement = await chrome.tabs.sendMessage(tab.id, {
+      type: 'execute-classroom-command-detached',
+      command,
+    });
+
+    if (!acknowledgement?.accepted) {
+      throw new Error('El script de Classroom no aceptó la acción automática.');
+    }
+  } catch (error) {
+    await removeActiveJob(command.commandId);
+    await chrome.alarms.clear(`${JOB_TIMEOUT_PREFIX}${command.commandId}`);
+    if (backgroundTab && tab?.id) {
+      try { await chrome.tabs.remove(tab.id); } catch (closeError) {}
+    }
+    await reportCommandResult(command.commandId, {
+      ok: false,
+      error: error.message || String(error),
+    });
+    throw error;
+  }
+}
+
+async function finishDetachedCommand(commandId, result, senderTabId) {
+  const jobs = await getActiveJobs();
+  const job = jobs[commandId] || null;
+  const normalizedResult = result && typeof result === 'object'
+    ? result
+    : { ok: false, error: 'El script de Classroom devolvió un resultado inválido.' };
+
+  try {
+    await reportCommandResult(commandId, normalizedResult);
+    if (normalizedResult.ok) {
+      await setBadge('✓', '#2f855a', 'Última acción automática completada.');
+    } else {
+      await setBadge('×', '#b91c1c', normalizedResult.error || 'La acción automática falló.');
+    }
+  } finally {
+    await chrome.alarms.clear(`${JOB_TIMEOUT_PREFIX}${commandId}`);
+    await removeActiveJob(commandId);
+
+    const tabId = job?.tabId || senderTabId;
+    if (job?.backgroundTab && tabId) {
+      try { await chrome.tabs.remove(tabId); } catch (error) {}
     }
 
-    startClassroomCommand(tab.id, command);
-    return await waitForCommandOutcome(tab.id, command, COMMAND_OUTCOME_TIMEOUT_MS);
+    setTimeout(() => {
+      void pollAuthorizedCommands();
+    }, 500);
+  }
+}
+
+async function failTimedOutJob(commandId) {
+  const jobs = await getActiveJobs();
+  const job = jobs[commandId];
+  if (!job) return;
+
+  const snapshot = job.tabId ? await captureClassroomPageSafe(job.tabId) : null;
+  const result = {
+    ok: false,
+    error: 'La acción automática excedió el tiempo máximo y no confirmó el resultado.',
+    snapshot,
+  };
+
+  try {
+    await reportCommandResult(commandId, result);
+    await setBadge('×', '#b91c1c', result.error);
   } finally {
-    if (backgroundTab && createdTab) {
-      try {
-        await sleep(1200);
-        await chrome.tabs.remove(tab.id);
-      } catch (error) {
-        // The tab may already be closed. Nothing else is required.
-      }
+    await removeActiveJob(commandId);
+    if (job.backgroundTab && job.tabId) {
+      try { await chrome.tabs.remove(job.tabId); } catch (error) {}
     }
+    void pollAuthorizedCommands();
+  }
+}
+
+async function recoverActiveJobs() {
+  const jobs = await getActiveJobs();
+  const now = Date.now();
+
+  for (const [commandId, job] of Object.entries(jobs)) {
+    const ageMs = now - Number(job.startedAt || 0);
+    if (ageMs > JOB_TIMEOUT_MINUTES * 60 * 1000) {
+      await failTimedOutJob(commandId);
+      continue;
+    }
+
+    try {
+      if (job.tabId) await chrome.tabs.get(job.tabId);
+      await chrome.alarms.create(`${JOB_TIMEOUT_PREFIX}${commandId}`, {
+        delayInMinutes: Math.max(0.5, JOB_TIMEOUT_MINUTES - ageMs / 60000),
+      });
+    } catch (error) {
+      await finishDetachedCommand(commandId, {
+        ok: false,
+        error: 'La pestaña de Classroom se cerró antes de terminar la acción.',
+      });
+    }
+  }
+}
+
+async function reportCommandResult(commandId, result) {
+  const config = await getConfig();
+  if (!config) throw new Error('Falta configurar la conexión del agente.');
+
+  if (result?.snapshot) {
+    await postApi(config, {
+      action: 'snapshot',
+      commandId,
+      ...result.snapshot,
+    });
+  }
+
+  const report = await postApi(config, {
+    action: 'result',
+    commandId,
+    ok: Boolean(result?.ok),
+    status: result?.ok ? 'completed' : 'failed',
+    result: result || {},
+    error: result?.error || '',
+  });
+
+  if (!report.ok) {
+    throw new Error(report.error || 'No se pudo registrar el resultado automático.');
   }
 }
 
 async function ensureContentScript(tabId) {
+  try {
+    const response = await chrome.tabs.sendMessage(tabId, { type: 'classroom-agent-ping' });
+    if (response?.ok) return;
+  } catch (error) {}
+
   await chrome.scripting.executeScript({
     target: { tabId },
     files: ['content.js'],
   });
-  await sleep(450);
-}
-
-function startClassroomCommand(tabId, command) {
-  chrome.tabs.sendMessage(tabId, {
-    type: 'execute-classroom-command',
-    command,
-  }).catch(() => {
-    // The content script may finish after its one-shot response channel closes.
-    // Completion is verified independently from the rendered Classroom page.
-  });
-}
-
-async function waitForCommandOutcome(tabId, command, timeoutMs) {
-  const started = Date.now();
-  const action = String(command?.action || '').toLowerCase();
-  let lastState = null;
-
-  while (Date.now() - started < timeoutMs) {
-    await sleep(750);
-    lastState = await inspectCommandState(tabId, command);
-
-    if (action === 'attach_link' && lastState.attached) {
-      return { ok: true, action, snapshot: lastState.snapshot };
-    }
-    if (action === 'submit' && lastState.submitted) {
-      return { ok: true, action, snapshot: lastState.snapshot };
-    }
-    if (action === 'attach_and_submit' && lastState.attached && lastState.submitted) {
-      return { ok: true, action, snapshot: lastState.snapshot };
-    }
-    if (action === 'reclaim' && lastState.assignable && !lastState.submitted) {
-      return { ok: true, action, snapshot: lastState.snapshot };
-    }
-  }
-
-  const snapshot = lastState?.snapshot || await captureClassroomPage(tabId);
-  throw new Error(buildOutcomeError(action, lastState, snapshot));
-}
-
-function buildOutcomeError(action, state, snapshot) {
-  const details = [];
-  if (action === 'attach_link' || action === 'attach_and_submit') {
-    details.push(state?.attached ? 'el archivo sí aparece adjunto' : 'el archivo no aparece adjunto');
-  }
-  if (action === 'submit' || action === 'attach_and_submit') {
-    details.push(state?.submitted ? 'la actividad aparece entregada' : 'la actividad no aparece entregada');
-  }
-  if (action === 'reclaim') {
-    details.push(state?.assignable ? 'la actividad volvió a estar asignada' : 'la entrega no se anuló');
-  }
-  const pageTitle = snapshot?.title ? ` Página: ${snapshot.title}.` : '';
-  return `Classroom no confirmó el resultado esperado (${details.join('; ') || action}).${pageTitle}`;
-}
-
-async function inspectCommandState(tabId, command) {
-  const snapshot = await captureClassroomPage(tabId);
-  const normalized = normalize(snapshot.text || '');
-  const links = Array.isArray(snapshot.links) ? snapshot.links : [];
-  const fileName = String(command?.payload?.fileName || '').trim();
-  const fileId = extractDriveFileId(command?.payload?.url || command?.payload?.attachmentUrl || '');
-
-  const submittedLabels = [
-    'anular la entrega',
-    'anular entrega',
-    'cancelar la entrega',
-    'cancelar entrega',
-    'unsubmit',
-    'desmarcar como completada',
-    'unmark as done',
-  ];
-  const assignableLabels = [
-    'entregar',
-    'turn in',
-    'marcar como completada',
-    'mark as done',
-  ];
-
-  const attachedByName = Boolean(fileName && normalized.includes(normalize(fileName)));
-  const attachedById = Boolean(fileId && links.some((item) => String(item.url || '').includes(fileId)));
-
-  return {
-    attached: attachedByName || attachedById,
-    submitted: submittedLabels.some((label) => normalized.includes(label)),
-    assignable: assignableLabels.some((label) => normalized.includes(label)),
-    snapshot,
-  };
+  await sleep(500);
 }
 
 async function ensureClassroomReady(tabId, targetUrl, timeoutMs) {
@@ -290,8 +315,7 @@ async function ensureClassroomReady(tabId, targetUrl, timeoutMs) {
 
   const last = await inspectClassroomTab(tabId);
   throw new Error(
-    `Classroom abrió la actividad, pero no terminó de mostrar el panel de trabajo. `
-      + `URL actual: ${last.url || targetUrl}`,
+    `Classroom abrió la actividad, pero no terminó de mostrar el panel de trabajo. URL actual: ${last.url || targetUrl}`,
   );
 }
 
@@ -316,15 +340,11 @@ async function inspectClassroomTab(tabId) {
           'anular la entrega',
           'unsubmit',
         ];
-        const loginRequired = /iniciar sesión|sign in/i.test(title + ' ' + bodyText);
-        const hasMarker = markers.some((marker) => normalized.includes(marker));
-        const assignmentUrl = /\/a\//.test(location.pathname);
         return {
-          ready: Boolean(assignmentUrl && hasMarker),
-          loginRequired,
+          ready: /\/a\//.test(location.pathname) && markers.some((marker) => normalized.includes(marker)),
+          loginRequired: /iniciar sesión|sign in/i.test(title + ' ' + bodyText),
           url: location.href,
           title,
-          textLength: bodyText.length,
         };
       },
     });
@@ -334,49 +354,27 @@ async function inspectClassroomTab(tabId) {
   }
 }
 
-async function captureClassroomPage(tabId) {
-  const results = await chrome.scripting.executeScript({
-    target: { tabId },
-    func: () => {
-      const isVisible = (node) => {
-        if (!node) return false;
-        const style = getComputedStyle(node);
-        const rect = node.getBoundingClientRect();
-        return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
-      };
-      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
-      const links = Array.from(document.querySelectorAll('a[href]'))
-        .filter(isVisible)
-        .slice(0, 300)
-        .map((anchor) => ({
-          text: clean(anchor.innerText || anchor.getAttribute('aria-label') || ''),
-          url: anchor.href,
-        }))
-        .filter((item) => item.text || item.url);
-      const buttons = Array.from(document.querySelectorAll('button,[role="button"]'))
-        .filter(isVisible)
-        .slice(0, 150)
-        .map((button) => clean(button.innerText || button.getAttribute('aria-label') || ''))
-        .filter(Boolean);
-      return {
+async function captureClassroomPageSafe(tabId) {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => ({
         url: location.href,
         title: document.title,
-        text: clean(document.body?.innerText || '').slice(0, 60000),
-        links,
-        buttons,
-      };
-    },
-  });
-  return results?.[0]?.result || { url: '', title: '', text: '', links: [], buttons: [] };
-}
-
-function extractDriveFileId(url) {
-  const match = String(url || '').match(/\/d\/([A-Za-z0-9_-]+)/);
-  return match ? match[1] : '';
-}
-
-function normalize(value) {
-  return String(value || '').replace(/\s+/g, ' ').trim().toLocaleLowerCase('es-MX');
+        text: String(document.body?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 60000),
+        links: Array.from(document.querySelectorAll('a[href]')).slice(0, 300).map((anchor) => ({
+          text: String(anchor.innerText || anchor.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim(),
+          url: anchor.href,
+        })),
+        buttons: Array.from(document.querySelectorAll('button,[role="button"]')).slice(0, 150).map((button) =>
+          String(button.innerText || button.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim(),
+        ).filter(Boolean),
+      }),
+    });
+    return results?.[0]?.result || null;
+  } catch (error) {
+    return null;
+  }
 }
 
 function waitForTab(tabId, timeoutMs) {
@@ -401,6 +399,23 @@ function waitForTab(tabId, timeoutMs) {
       if (current.status === 'complete') finish();
     }).catch(finish);
   });
+}
+
+async function getActiveJobs() {
+  const stored = await chrome.storage.local.get({ [ACTIVE_JOBS_KEY]: {} });
+  return stored[ACTIVE_JOBS_KEY] || {};
+}
+
+async function saveActiveJob(commandId, job) {
+  const jobs = await getActiveJobs();
+  jobs[commandId] = job;
+  await chrome.storage.local.set({ [ACTIVE_JOBS_KEY]: jobs });
+}
+
+async function removeActiveJob(commandId) {
+  const jobs = await getActiveJobs();
+  delete jobs[commandId];
+  await chrome.storage.local.set({ [ACTIVE_JOBS_KEY]: jobs });
 }
 
 async function getConfig() {
