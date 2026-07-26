@@ -34,7 +34,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message?.type === 'execute-approved-command') {
     sendResponse({ ok: true, started: true });
-    void launchManualCommand(message.command).catch((error) => {
+    void launchDetachedCommand(message.command, { useVisibleTab: true }).catch((error) => {
       void setBadge('×', '#b91c1c', error.message || String(error));
     });
     return false;
@@ -99,7 +99,10 @@ async function pollAuthorizedCommands() {
       throw new Error(claim.error || 'No se pudo reclamar la acción automática.');
     }
 
-    await launchDetachedCommand(command, { backgroundTab: true });
+    // Classroom often leaves its assignment panel unrendered in an inactive tab.
+    // The agent therefore reuses or opens a visible Classroom tab, but performs
+    // every click itself without requiring user interaction.
+    await launchDetachedCommand(command, { useVisibleTab: true });
     await setBadge('…', '#2563eb', 'Acción automática en ejecución.');
   } catch (error) {
     await setBadge('×', '#b91c1c', error.message || String(error));
@@ -113,29 +116,32 @@ function isAutoAuthorized(command) {
   return payload.autoAuthorized === true || payload.auto_authorized === true;
 }
 
-async function launchManualCommand(command) {
-  await launchDetachedCommand(command, { backgroundTab: false });
-}
-
 async function launchDetachedCommand(command, options = {}) {
   const targetUrl = command?.targetUrl
     || command?.payload?.targetUrl
     || command?.payload?.alternateLink
     || 'https://classroom.google.com/';
 
-  const backgroundTab = Boolean(options.backgroundTab);
+  const useVisibleTab = options.useVisibleTab !== false;
   let tab;
+  let createdTab = false;
 
-  if (backgroundTab) {
-    tab = await chrome.tabs.create({ url: targetUrl, active: false });
-  } else {
+  if (useVisibleTab) {
     const tabs = await chrome.tabs.query({ url: 'https://classroom.google.com/*' });
-    tab = tabs.find((item) => item.active) || tabs[0];
+    tab = tabs.find((item) => item.url === targetUrl)
+      || tabs.find((item) => item.active)
+      || tabs[0];
+
     if (!tab) {
       tab = await chrome.tabs.create({ url: targetUrl, active: true });
+      createdTab = true;
     } else {
       tab = await chrome.tabs.update(tab.id, { url: targetUrl, active: true });
     }
+    await chrome.windows.update(tab.windowId, { focused: true });
+  } else {
+    tab = await chrome.tabs.create({ url: targetUrl, active: false });
+    createdTab = true;
   }
 
   try {
@@ -146,7 +152,7 @@ async function launchDetachedCommand(command, options = {}) {
     await saveActiveJob(command.commandId, {
       command,
       tabId: tab.id,
-      backgroundTab,
+      closeWhenDone: !useVisibleTab && createdTab,
       startedAt: Date.now(),
     });
 
@@ -165,12 +171,13 @@ async function launchDetachedCommand(command, options = {}) {
   } catch (error) {
     await removeActiveJob(command.commandId);
     await chrome.alarms.clear(`${JOB_TIMEOUT_PREFIX}${command.commandId}`);
-    if (backgroundTab && tab?.id) {
+    if (!useVisibleTab && createdTab && tab?.id) {
       try { await chrome.tabs.remove(tab.id); } catch (closeError) {}
     }
     await reportCommandResult(command.commandId, {
       ok: false,
       error: error.message || String(error),
+      snapshot: tab?.id ? await captureClassroomPageSafe(tab.id) : null,
     });
     throw error;
   }
@@ -195,7 +202,7 @@ async function finishDetachedCommand(commandId, result, senderTabId) {
     await removeActiveJob(commandId);
 
     const tabId = job?.tabId || senderTabId;
-    if (job?.backgroundTab && tabId) {
+    if (job?.closeWhenDone && tabId) {
       try { await chrome.tabs.remove(tabId); } catch (error) {}
     }
 
@@ -222,7 +229,7 @@ async function failTimedOutJob(commandId) {
     await setBadge('×', '#b91c1c', result.error);
   } finally {
     await removeActiveJob(commandId);
-    if (job.backgroundTab && job.tabId) {
+    if (job.closeWhenDone && job.tabId) {
       try { await chrome.tabs.remove(job.tabId); } catch (error) {}
     }
     void pollAuthorizedCommands();
@@ -283,14 +290,17 @@ async function reportCommandResult(commandId, result) {
 async function ensureContentScript(tabId) {
   try {
     const response = await chrome.tabs.sendMessage(tabId, { type: 'classroom-agent-ping' });
-    if (response?.ok) return;
+    if (response?.ok && response?.version === '0.3.1') return;
   } catch (error) {}
 
   await chrome.scripting.executeScript({
     target: { tabId },
     files: ['content.js'],
   });
-  await sleep(500);
+  await sleep(600);
+
+  const response = await chrome.tabs.sendMessage(tabId, { type: 'classroom-agent-ping' });
+  if (!response?.ok) throw new Error('No se pudo activar el script dentro de Classroom.');
 }
 
 async function ensureClassroomReady(tabId, targetUrl, timeoutMs) {
@@ -304,13 +314,13 @@ async function ensureClassroomReady(tabId, targetUrl, timeoutMs) {
     }
     if (state.ready) return state;
 
-    if (!reloaded && Date.now() - started > 22000) {
+    if (!reloaded && Date.now() - started > 25000) {
       await chrome.tabs.reload(tabId);
       await waitForTab(tabId, 35000);
       reloaded = true;
     }
 
-    await sleep(1500);
+    await sleep(1200);
   }
 
   const last = await inspectClassroomTab(tabId);
