@@ -1,6 +1,7 @@
 const POLL_ALARM = 'chatgpt-classroom-agent-poll';
 const POLL_MINUTES = 1;
 const MAX_COMMANDS_PER_CYCLE = 3;
+const CLASSROOM_READY_TIMEOUT_MS = 65000;
 let pollInFlight = false;
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -150,7 +151,8 @@ async function executeApprovedCommand(command, options = {}) {
 
   try {
     await waitForTab(tab.id, 35000);
-    await sleep(backgroundTab ? 2500 : 1500);
+    await ensureClassroomReady(tab.id, targetUrl, CLASSROOM_READY_TIMEOUT_MS);
+    await sleep(750);
 
     try {
       return await chrome.tabs.sendMessage(tab.id, {
@@ -162,7 +164,7 @@ async function executeApprovedCommand(command, options = {}) {
         target: { tabId: tab.id },
         files: ['content.js'],
       });
-      await sleep(700);
+      await sleep(900);
       return chrome.tabs.sendMessage(tab.id, {
         type: 'execute-classroom-command',
         command,
@@ -171,12 +173,78 @@ async function executeApprovedCommand(command, options = {}) {
   } finally {
     if (backgroundTab && createdTab) {
       try {
-        await sleep(1000);
+        await sleep(1200);
         await chrome.tabs.remove(tab.id);
       } catch (error) {
         // The tab may already be closed. Nothing else is required.
       }
     }
+  }
+}
+
+async function ensureClassroomReady(tabId, targetUrl, timeoutMs) {
+  const started = Date.now();
+  let reloaded = false;
+
+  while (Date.now() - started < timeoutMs) {
+    const state = await inspectClassroomTab(tabId);
+    if (state.loginRequired) {
+      throw new Error('Classroom solicitó iniciar sesión en la cuenta escolar.');
+    }
+    if (state.ready) return state;
+
+    if (!reloaded && Date.now() - started > 22000) {
+      await chrome.tabs.reload(tabId);
+      await waitForTab(tabId, 35000);
+      reloaded = true;
+    }
+
+    await sleep(1500);
+  }
+
+  const last = await inspectClassroomTab(tabId);
+  throw new Error(
+    `Classroom abrió la actividad, pero no terminó de mostrar el panel de trabajo. `
+      + `URL actual: ${last.url || targetUrl}`,
+  );
+}
+
+async function inspectClassroomTab(tabId) {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const bodyText = String(document.body?.innerText || '').replace(/\s+/g, ' ').trim();
+        const normalized = bodyText.toLocaleLowerCase('es-MX');
+        const title = String(document.title || '');
+        const markers = [
+          'tu trabajo',
+          'your work',
+          'agregar o crear',
+          'añadir o crear',
+          'add or create',
+          'marcar como completada',
+          'mark as done',
+          'entregar',
+          'turn in',
+          'anular la entrega',
+          'unsubmit',
+        ];
+        const loginRequired = /iniciar sesión|sign in/i.test(title + ' ' + bodyText);
+        const hasMarker = markers.some((marker) => normalized.includes(marker));
+        const assignmentUrl = /\/a\//.test(location.pathname);
+        return {
+          ready: Boolean(assignmentUrl && hasMarker),
+          loginRequired,
+          url: location.href,
+          title,
+          textLength: bodyText.length,
+        };
+      },
+    });
+    return results?.[0]?.result || { ready: false, loginRequired: false, url: '' };
+  } catch (error) {
+    return { ready: false, loginRequired: false, url: '', error: error.message || String(error) };
   }
 }
 
