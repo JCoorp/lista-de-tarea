@@ -23,7 +23,10 @@
       return { ok: true, action, snapshot: capturePage() };
     }
     if (action === 'attach_link') {
-      await attachLink(command.payload?.url || command.payload?.attachmentUrl || '');
+      await attachLink(
+        command.payload?.url || command.payload?.attachmentUrl || '',
+        command.payload?.fileName || '',
+      );
       return { ok: true, action, snapshot: capturePage() };
     }
     if (action === 'submit') {
@@ -31,7 +34,10 @@
       return { ok: true, action, snapshot: capturePage() };
     }
     if (action === 'attach_and_submit') {
-      await attachLink(command.payload?.url || command.payload?.attachmentUrl || '');
+      await attachLink(
+        command.payload?.url || command.payload?.attachmentUrl || '',
+        command.payload?.fileName || '',
+      );
       await submitAssignment();
       return { ok: true, action, snapshot: capturePage() };
     }
@@ -42,32 +48,65 @@
     throw new Error(`Acción no compatible: ${action}`);
   }
 
-  async function attachLink(url) {
+  async function attachLink(url, fileName = '') {
     if (!/^https?:\/\//i.test(url)) throw new Error('El comando no contiene un enlace válido.');
 
     const addButton = await waitForText([
       'Añadir o crear',
       'Agregar o crear',
       'Add or create',
-    ], 12000);
+    ], 12000, true);
     clickElement(addButton);
 
-    const linkOption = await waitForText(['Enlace', 'Link'], 8000);
+    const linkOption = await waitForText(['Enlace', 'Link'], 8000, true);
     clickElement(linkOption);
 
-    const input = await waitForInput(8000);
+    const dialog = await waitUntil(
+      () => findVisibleDialog(),
+      8000,
+      'No encontré la ventana para agregar el vínculo.',
+    );
+
+    const input = await waitForInputWithin(dialog, 8000);
     setInputValue(input, url);
 
-    const confirm = await waitForText([
-      'Añadir enlace',
-      'Agregar enlace',
-      'Add link',
-      'Añadir',
-      'Agregar',
-      'Add',
-    ], 8000, true);
+    await waitUntil(
+      () => String(input.value || '').trim() === url,
+      4000,
+      'Classroom no conservó el enlace en el campo de vínculo.',
+    );
+
+    const confirm = await waitUntil(() => {
+      const currentDialog = findVisibleDialog() || dialog;
+      const button = findVisibleByTextWithin(currentDialog, [
+        'Agregar un vínculo',
+        'Añadir un vínculo',
+        'Add link',
+      ], true);
+      if (!button) return null;
+      if (button.disabled || button.getAttribute('aria-disabled') === 'true') return null;
+      return button;
+    }, 10000, 'El botón para agregar el vínculo no se habilitó.');
+
     clickElement(confirm);
-    await sleep(1800);
+
+    await waitUntil(
+      () => !document.contains(dialog) || !isVisible(dialog),
+      12000,
+      'La ventana de vínculo no se cerró después de agregarlo.',
+    );
+
+    const fileId = extractDriveFileId(url);
+    await waitUntil(() => {
+      const visibleText = cleanText(document.body?.innerText || '');
+      if (fileName && visibleText.includes(fileName)) return true;
+      if (fileId) {
+        return Array.from(document.querySelectorAll('a[href]'))
+          .filter(isVisible)
+          .some((anchor) => String(anchor.href || '').includes(fileId));
+      }
+      return false;
+    }, 15000, 'Classroom no confirmó que el vínculo quedara adjunto.');
   }
 
   async function submitAssignment() {
@@ -192,11 +231,11 @@
     return waitUntil(() => findVisibleByText(labels, preferButton), timeoutMs, `No encontré: ${labels.join(' / ')}`);
   }
 
-  function waitForInput(timeoutMs) {
+  function waitForInputWithin(root, timeoutMs) {
     return waitUntil(() => {
-      const candidates = Array.from(document.querySelectorAll('input[type="url"],input[type="text"],textarea'));
+      const candidates = Array.from(root.querySelectorAll('input[type="url"],input[type="text"],textarea'));
       return candidates.find(isVisible) || null;
-    }, timeoutMs, 'No encontré el campo para pegar el enlace.');
+    }, timeoutMs, 'No encontré el campo para pegar el enlace dentro de la ventana de vínculo.');
   }
 
   function findVisibleByText(labels, preferButton = false) {
@@ -240,8 +279,16 @@
       : HTMLInputElement.prototype;
     const descriptor = Object.getOwnPropertyDescriptor(prototype, 'value');
     descriptor?.set?.call(input, value);
-    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.focus();
+    input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
     input.dispatchEvent(new Event('change', { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'End' }));
+    input.blur();
+  }
+
+  function extractDriveFileId(url) {
+    const match = String(url || '').match(/\/d\/([A-Za-z0-9_-]+)/);
+    return match ? match[1] : '';
   }
 
   function waitUntil(test, timeoutMs, errorMessage) {
