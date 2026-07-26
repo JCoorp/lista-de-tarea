@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "ChatGPT Classroom Agent",
-  "version": "0.3.3",
-  "description": "Ejecuta automáticamente acciones autorizadas de Classroom y confirma la entrega aunque el diálogo no use el rol estándar.",
+  "version": "0.3.4",
+  "description": "Ejecuta automáticamente acciones autorizadas de Classroom, incluida la eliminación de archivos adjuntos después de anular una entrega.",
   "permissions": [
     "alarms",
     "storage",
