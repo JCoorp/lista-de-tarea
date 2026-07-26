@@ -3,16 +3,60 @@
   window.__chatgptClassroomAgentLoaded = true;
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message?.type !== 'execute-classroom-command') return false;
-    executeCommand(message.command)
-      .then(sendResponse)
-      .catch((error) => sendResponse({
+    if (message?.type === 'classroom-agent-ping') {
+      sendResponse({ ok: true });
+      return false;
+    }
+
+    if (message?.type === 'execute-classroom-command-detached' || message?.type === 'execute-classroom-command') {
+      sendResponse({ ok: true, accepted: true });
+      void executeDetached(message.command);
+      return false;
+    }
+
+    return false;
+  });
+
+  async function executeDetached(command) {
+    let result;
+    try {
+      result = await executeCommand(command);
+    } catch (error) {
+      result = {
         ok: false,
         error: error.message || String(error),
         snapshot: capturePage(),
-      }));
-    return true;
-  });
+      };
+    }
+
+    try {
+      await reportDetachedResult(command?.commandId, result);
+    } catch (error) {
+      console.error('ChatGPT Classroom Agent no pudo registrar el resultado:', error);
+    }
+  }
+
+  async function reportDetachedResult(commandId, result) {
+    if (!commandId) throw new Error('La acción no contiene commandId.');
+
+    let lastError = null;
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      try {
+        const response = await chrome.runtime.sendMessage({
+          type: 'classroom-command-finished',
+          commandId,
+          result,
+        });
+        if (response?.accepted) return;
+        lastError = new Error('El proceso en segundo plano no aceptó el resultado.');
+      } catch (error) {
+        lastError = error;
+      }
+      await sleep(750 + attempt * 500);
+    }
+
+    throw lastError || new Error('No se pudo registrar el resultado de Classroom.');
+  }
 
   async function executeCommand(command) {
     const action = String(command?.action || '').toLowerCase();
