@@ -56,10 +56,10 @@
       'Agregar o crear',
       'Add or create',
     ], 12000, true);
-    clickElement(addButton);
+    await activateElement(addButton);
 
     const linkOption = await waitForText(['Enlace', 'Link'], 8000, true);
-    clickElement(linkOption);
+    await activateElement(linkOption);
 
     const dialog = await waitUntil(
       () => findVisibleDialog(),
@@ -76,24 +76,21 @@
       'Classroom no conservó el enlace en el campo de vínculo.',
     );
 
-    const confirm = await waitUntil(() => {
-      const currentDialog = findVisibleDialog() || dialog;
-      const button = findVisibleByTextWithin(currentDialog, [
-        'Agregar un vínculo',
-        'Añadir un vínculo',
-        'Add link',
-      ], true);
-      if (!button) return null;
-      if (button.disabled || button.getAttribute('aria-disabled') === 'true') return null;
-      return button;
-    }, 10000, 'El botón para agregar el vínculo no se habilitó.');
-
-    clickElement(confirm);
-
-    await waitUntil(
+    await clickUntilEffect(
+      () => {
+        const currentDialog = findVisibleDialog() || dialog;
+        const button = findVisibleByTextWithin(currentDialog, [
+          'Agregar un vínculo',
+          'Añadir un vínculo',
+          'Add link',
+        ], true);
+        if (!button) return null;
+        if (button.disabled || button.getAttribute('aria-disabled') === 'true') return null;
+        return button;
+      },
       () => !document.contains(dialog) || !isVisible(dialog),
-      12000,
-      'La ventana de vínculo no se cerró después de agregarlo.',
+      15000,
+      'La ventana de vínculo no se cerró después de varios intentos de agregarlo.',
     );
 
     const fileId = extractDriveFileId(url);
@@ -106,7 +103,7 @@
           .some((anchor) => String(anchor.href || '').includes(fileId));
       }
       return false;
-    }, 15000, 'Classroom no confirmó que el vínculo quedara adjunto.');
+    }, 20000, 'Classroom no confirmó que el vínculo quedara adjunto.');
   }
 
   async function submitAssignment() {
@@ -117,8 +114,10 @@
       'Mark as done',
     ];
 
+    if (isSubmittedState()) return;
+
     const first = await waitForText(submitLabels, 12000, true);
-    clickElement(first);
+    await activateElement(first);
 
     const nextStep = await waitUntil(() => {
       if (isSubmittedState()) return { alreadySubmitted: true };
@@ -128,15 +127,23 @@
 
       const confirmButton = findVisibleByTextWithin(dialog, submitLabels, true);
       return confirmButton ? { confirmButton } : null;
-    }, 10000, 'No encontré la ventana de confirmación para entregar o marcar como completada.');
+    }, 12000, 'No encontré la ventana de confirmación para entregar o marcar como completada.');
 
     if (nextStep.confirmButton) {
-      clickElement(nextStep.confirmButton);
+      await clickUntilEffect(
+        () => {
+          const dialog = findVisibleDialog();
+          return dialog ? findVisibleByTextWithin(dialog, submitLabels, true) : null;
+        },
+        () => isSubmittedState(),
+        18000,
+        'Classroom no confirmó la entrega después de varios intentos.',
+      );
     }
 
     await waitUntil(
       () => isSubmittedState(),
-      12000,
+      15000,
       'Classroom no confirmó que la actividad quedara entregada o marcada como completada.',
     );
   }
@@ -152,8 +159,10 @@
       'Unmark as done',
     ];
 
+    if (isAssignableState()) return;
+
     const first = await waitForText(reclaimLabels, 12000, true);
-    clickElement(first);
+    await activateElement(first);
 
     const nextStep = await waitUntil(() => {
       if (isAssignableState()) return { alreadyReclaimed: true };
@@ -163,15 +172,23 @@
 
       const confirmButton = findVisibleByTextWithin(dialog, reclaimLabels, true);
       return confirmButton ? { confirmButton } : null;
-    }, 10000, 'No encontré la ventana de confirmación para anular la entrega.');
+    }, 12000, 'No encontré la ventana de confirmación para anular la entrega.');
 
     if (nextStep.confirmButton) {
-      clickElement(nextStep.confirmButton);
+      await clickUntilEffect(
+        () => {
+          const dialog = findVisibleDialog();
+          return dialog ? findVisibleByTextWithin(dialog, reclaimLabels, true) : null;
+        },
+        () => isAssignableState(),
+        18000,
+        'Classroom no confirmó la anulación después de varios intentos.',
+      );
     }
 
     await waitUntil(
       () => isAssignableState(),
-      12000,
+      15000,
       'Classroom no confirmó que la entrega quedara anulada.',
     );
   }
@@ -266,11 +283,42 @@
     return node.closest('button,[role="button"],[role="menuitem"]') || node;
   }
 
-  function clickElement(node) {
-    node.scrollIntoView({ block: 'center', inline: 'center' });
-    node.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-    node.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-    node.click();
+  async function activateElement(node) {
+    const target = closestInteractive(node);
+    target.scrollIntoView({ block: 'center', inline: 'center' });
+    try { target.focus({ preventScroll: true }); } catch (error) { target.focus?.(); }
+
+    const mouseOptions = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view: window,
+      button: 0,
+      buttons: 1,
+    };
+
+    try { target.dispatchEvent(new PointerEvent('pointerdown', mouseOptions)); } catch (error) {}
+    target.dispatchEvent(new MouseEvent('mousedown', mouseOptions));
+    try { target.dispatchEvent(new PointerEvent('pointerup', { ...mouseOptions, buttons: 0 })); } catch (error) {}
+    target.dispatchEvent(new MouseEvent('mouseup', { ...mouseOptions, buttons: 0 }));
+    target.click();
+    await sleep(350);
+  }
+
+  async function clickUntilEffect(getNode, effect, timeoutMs, errorMessage) {
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      if (effect()) return true;
+      const node = getNode();
+      if (node && isVisible(node) && !node.disabled && node.getAttribute('aria-disabled') !== 'true') {
+        await activateElement(node);
+      } else {
+        await sleep(300);
+      }
+      if (effect()) return true;
+      await sleep(500);
+    }
+    throw new Error(errorMessage);
   }
 
   function setInputValue(input, value) {
