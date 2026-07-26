@@ -1,15 +1,16 @@
 (() => {
-  if (window.__chatgptClassroomAgentLoaded) return;
-  window.__chatgptClassroomAgentLoaded = true;
+  const AGENT_VERSION = '0.3.2';
+  if (window.__chatgptClassroomAgentVersion === AGENT_VERSION) return;
+  window.__chatgptClassroomAgentVersion = AGENT_VERSION;
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message?.type === 'classroom-agent-ping') {
-      sendResponse({ ok: true });
+      sendResponse({ ok: true, version: AGENT_VERSION });
       return false;
     }
 
     if (message?.type === 'execute-classroom-command-detached' || message?.type === 'execute-classroom-command') {
-      sendResponse({ ok: true, accepted: true });
+      sendResponse({ ok: true, accepted: true, version: AGENT_VERSION });
       void executeDetached(message.command);
       return false;
     }
@@ -316,11 +317,15 @@
     });
     if (exact) return closestInteractive(exact);
 
-    const partial = nodes.find((node) => {
-      const text = normalize(node.innerText || node.getAttribute('aria-label') || '');
-      return normalizedLabels.some((label) => text === label || text.startsWith(label));
-    });
-    return partial ? closestInteractive(partial) : null;
+    const partialMatches = nodes
+      .map((node) => ({
+        node,
+        text: normalize(node.innerText || node.getAttribute('aria-label') || ''),
+      }))
+      .filter(({ text }) => normalizedLabels.some((label) => text.includes(label)))
+      .sort((a, b) => a.text.length - b.text.length);
+
+    return partialMatches.length ? closestInteractive(partialMatches[0].node) : null;
   }
 
   function closestInteractive(node) {
